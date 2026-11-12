@@ -1,0 +1,71 @@
+name: 'Upload to Aliyun Drive Enterprise (EDM/CDE)'
+description: '把构建产物上传到阿里云盘企业版(企业文件管理/CDE)指定目录。协议兼容 PDS v2 API,token 由 edm-token CLI 获取后存入 Secret。'
+branding:
+  icon: 'upload-cloud'
+  color: 'blue'
+inputs:
+  token:
+    description: 'token JSON(edm-token login 的输出)或单独的 refresh_token。refresh_token 会轮换: 若 Action 输出了新的 refresh_token, 请更新 Secret。'
+    required: true
+  files:
+    description: '要上传的文件, 支持多行/空格分隔的 glob(如 dist/*.zip 或 **/*.apk)。'
+    required: true
+  drive_id:
+    description: '目标空间 drive_id。默认取企业主空间(root_group_drive)。与 drive_name 二选一, drive_id 优先。'
+    required: false
+    default: ''
+  drive_name:
+    description: '按名称选择团队空间(如 "项目开发【内部】")。列出全部可选: 留空则用主空间。与 drive_id 二选一, drive_id 优先。'
+    required: false
+    default: ''
+  parent_path:
+    description: '网盘内目标目录路径, 不存在会自动创建(从根目录起, 如 /ci-builds/myapp)。与 parent_file_id 二选一, 默认 /。'
+    required: false
+    default: '/'
+  parent_file_id:
+    description: '目标目录的 file_id。设置后优先于 parent_path。'
+    required: false
+    default: ''
+  check_name_mode:
+    description: '同名冲突策略: auto_rename(自动改名) / refuse(报错) / ignore(跳过) / overwrite(覆盖)。'
+    required: false
+    default: 'auto_rename'
+  concurrency:
+    description: '分片上传并发数。默认 3。若服务端哈希校验报错可降为 1。'
+    required: false
+    default: '3'
+  part_size:
+    description: '分片大小(字节), 默认 10MB (10485760), 最小 1MB。单文件 <=5GB 时实际单片上传。'
+    required: false
+    default: '10485760'
+  api_endpoint:
+    description: 'API 端点覆盖, 一般留空(由 domain_id 自动发现)。'
+    required: false
+    default: ''
+  client_id:
+    description: 'OAuth client_id, 默认 EDM 桌面端公共 client。'
+    required: false
+    default: 'EdmpX4opdRNI9feB'
+outputs:
+  results:
+    description: '上传结果 JSON 数组: [{name, file_id, drive_id, size, sha1, rapid_upload}]'
+  refresh_token:
+    description: '若本次运行刷新了 token 且 refresh_token 发生轮换, 输出新值用于更新 Secret。'
+runs:
+  using: 'composite'
+  steps:
+    - name: Upload to EDM
+      shell: bash
+      env:
+        INPUT_TOKEN: ${{ inputs.token }}
+        INPUT_FILES: ${{ inputs.files }}
+        INPUT_DRIVE_ID: ${{ inputs.drive_id }}
+        INPUT_DRIVE_NAME: ${{ inputs.drive_name }}
+        INPUT_PARENT_PATH: ${{ inputs.parent_path }}
+        INPUT_PARENT_FILE_ID: ${{ inputs.parent_file_id }}
+        INPUT_CHECK_NAME_MODE: ${{ inputs.check_name_mode }}
+        INPUT_CONCURRENCY: ${{ inputs.concurrency }}
+        INPUT_PART_SIZE: ${{ inputs.part_size }}
+        INPUT_API_ENDPOINT: ${{ inputs.api_endpoint }}
+        INPUT_CLIENT_ID: ${{ inputs.client_id }}
+      run: node "$GITHUB_ACTION_PATH/scripts/upload.mjs"
