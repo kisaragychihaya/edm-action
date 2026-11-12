@@ -10,13 +10,12 @@ GitHub Action: 把构建产物直接传到企业网盘。协议经真实客户�
 ## 第一步:获取 token(本地,一次性)
 
 ```bash
-node token-cli/edm-token.mjs login
-# 浏览器打开登录页 → 手机号+短信验证码登录(含滑块, 与网页版一致) →
-# 复制地址栏带 code= 的 URL 粘贴回终端
-# token JSON 保存到 ~/.edm-token.json 并打印
+node token-cli/edm-token.mjs login sms --domain <企业代码> --phone 13800138000
+# 收到短信后输入 6 位验证码 → token JSON 保存到 ~/.edm-token.json 并打印
 ```
 
-> 说明: 短信直登接口强制要求阿里云滑块验证码(`nvc_param`,服务端强制校验,实测),CLI 无法自动通过,所以登录动作在浏览器里完成,CLI 只负责换 token(走与 Web 端相同的 `POST web-sv.aliyunpds.com/get_token`)。
+> 说明: 滑块(阿里云验证码 2.0)只是登录页前端的门槛,服务端不强制校验 `captcha_param`,且官方自带 `skip_captcha=1` 旁路,所以 CLI 可以纯接口完成「手机号+短信验证码 → token」,全程不需要浏览器。链路:`authorize`(拿 SESSIONID) → `send_sms_code` → `signin`(拿 code) → `POST web-sv.aliyunpds.com/get_token`。
+> 备用: `node token-cli/edm-token.mjs login browser` 走浏览器登录(CDP 自动读取 token)。
 
 把输出的 JSON 存为仓库 Secret:
 

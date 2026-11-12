@@ -88,18 +88,25 @@ async function discoverEndpoints(domainId) {
 
 // ---------- OAuth ----------
 // 授权码换 token — 与 Web 端一致走 web-sv 网关 (抓包自 pds-home-ui 0.41.0)
+// home-ui 的 getTokenByCode() 会把 redirect_uri 再 encodeURIComponent 一次,
+// 两种写法服务端都见过, 先原始后编码各试一次
 async function exchangeCode(ep, code, domainId) {
-  const res = await http('POST', `${SV_ENDPOINT}/get_token`, {
-    body: {
-      product_type: 'edm',
-      code,
-      domain_id: domainId,
-      client_id: ep.client_id || DEFAULT_CLIENT_ID,
-      redirect_uri: ep.redirect_uri || DEFAULT_REDIRECT_URI,
-    },
-  });
-  if (!res.json || !res.json.access_token) die(`换 token 失败: ${res.text.slice(0, 300)}`);
-  return res.json;
+  const redirect = ep.redirect_uri || DEFAULT_REDIRECT_URI;
+  let lastErr = '';
+  for (const ru of [redirect, encodeURIComponent(redirect)]) {
+    const res = await http('POST', `${SV_ENDPOINT}/get_token`, {
+      body: {
+        product_type: 'edm',
+        code,
+        domain_id: domainId,
+        client_id: ep.client_id || DEFAULT_CLIENT_ID,
+        redirect_uri: ru,
+      },
+    });
+    if (res.json && res.json.access_token) return res.json;
+    lastErr = res.text;
+  }
+  die(`换 token 失败: ${lastErr.slice(0, 300)}`);
 }
 
 async function refreshToken(ep, refreshToken) {
@@ -128,14 +135,69 @@ function normalizeToken(t, domainId) {
   };
 }
 
-// ---------- 登录:短信验证码 ----------
+// ---------- 登录:短信验证码(纯接口, 无滑块) ----------
+// 逆向结论(pds-auth-ui 0.43.0): 滑块(阿里云验证码 2.0)只是 SPA 前端门槛,
+// 官方自带 skip_captcha=1 旁路; 服务端 /v2/oauth/signin 不强制 captcha_param。
+// 链路: authorize(拿 SESSIONID) → send_sms_code → signin(拿 code) → get_token。
 async function loginSms(args) {
-  // 抓包结论: 短信/邮箱直登接口(login.aliyunfile.com/v2/account/send_sms|signin)强制要求
-  // 阿里云验证码 2.0 的 captcha_param(服务端报 InvalidParameterMissing.NvcParam), 纯 CLI 无法通过。
-  // 但浏览器登录页里仍是"手机号+短信验证码", 用户操作一样, 只是验证码环节在浏览器里完成。
-  console.error('说明: 短信直登接口强制要求阿里云滑块验证码(nvc_param/captcha_param), CLI 无法自动通过。');
-  console.error('      请在接下来打开的浏览器页面里完成滑块+短信验证(与网页版登录相同)。\n');
-  return loginBrowser(args);
+  const domain = args.domain || loadState(args)?.domain_id || (await prompt('企业代码 domain_id: '));
+  const ep = await discoverEndpoints(domain);
+  const authBase = ep.auth_endpoint.replace(/\/$/, '');
+  const clientId = ep.client_id || DEFAULT_CLIENT_ID;
+  const redirect = ep.redirect_uri || DEFAULT_REDIRECT_URI;
+  const phone = args.phone || (await prompt('手机号: '));
+  const region = String(args.region || '86');
+
+  // 1) authorize: 拿 SESSIONID cookie (skip_captcha=1 是官方旁路开关)
+  const q = new URLSearchParams({
+    state: JSON.stringify({ product_type: 'edm', domainId: domain }),
+    client_id: clientId,
+    redirect_uri: redirect,
+    response_type: 'code',
+    login_type: 'default',
+    hide_consent: 'true',
+    lang: 'zh_CN',
+    skip_captcha: '1',
+  });
+  const a = await http('GET', `${authBase}/v2/oauth/authorize?${q}`);
+  if (a.status !== 200) die(`authorize 失败(${a.status}): ${a.text.slice(0, 200)}`);
+  const cookies = a.cookies;
+  if (!/SESSIONID=/.test(cookies)) die('authorize 没有下发 SESSIONID cookie');
+
+  // 2) 发短信验证码
+  const s = await http('POST', `${authBase}/v2/account/mobile/send_sms_code`, {
+    cookies,
+    body: { phone_region: region, phone_number: phone, captcha_id: '', captcha_text: '', type: 'login', language: 'zh-cn' },
+  });
+  const smsCodeId = s.json?.data?.sms_code_id || s.json?.sms_code_id; // 实测响应是平铺的 {sms_code_id}
+  if (!smsCodeId) {
+    if (s.json?.code === 'LoginDenied') die(`登录被拒绝(号码未注册或触发风控限频, 稍后重试): ${s.text.slice(0, 200)}`);
+    die(`发送短信失败(${s.status}): ${s.text.slice(0, 300)}`);
+  }
+  console.error(`验证码已发送到 +${region} ${phone}`);
+  const code6 = args.code || (await prompt('短信验证码: '));
+
+  // 3) signin (必须带 SESSIONID)
+  const si = await http('POST', `${authBase}/v2/oauth/signin`, {
+    cookies,
+    body: {
+      intl_login: false,
+      sign_in_type: 'sms',
+      phone_region: region,
+      phone_number: phone,
+      sms_code_id: smsCodeId,
+      sms_code: String(code6),
+      remarks: JSON.stringify({ lang: 'zh_CN', login_type: 'phone', keep_login: true, next_login: false }),
+    },
+  });
+  const gotoUrl = si.json?.data?.goto || si.json?.goto;
+  if (!gotoUrl) die(`登录失败(${si.status}): ${si.text.slice(0, 300)}`);
+  const oauthCode = new URL(gotoUrl).searchParams.get('code');
+  if (!oauthCode) die(`goto 里没有 code: ${gotoUrl}`);
+
+  // 4) code 换 token
+  const raw = await exchangeCode(ep, oauthCode, domain);
+  return normalizeToken(raw, domain);
 }
 
 // ---------- 登录:浏览器 ----------
@@ -345,12 +407,13 @@ async function main() {
     return;
   } else {
     console.log(`用法:
-  node edm-token.mjs login [sms]            手机号+短信验证码登录(浏览器里完成滑块+短信, 推荐)
-  node edm-token.mjs login browser          同上, 直接走浏览器流程
+  node edm-token.mjs login [sms] --domain <id> [--phone 13800138000]   手机号+短信验证码登录(纯接口, 无滑块)
+  node edm-token.mjs login browser          浏览器登录(CDP 自动读 token, 滑块在浏览器里过)
   node edm-token.mjs refresh [--refresh-token <rt>]   刷新 token(会轮换 refresh_token!)
   node edm-token.mjs from-client            从本机 EDM 客户端提取当前 token
   node edm-token.mjs whoami                 查看已存 token 状态
-通用: --state <path> 指定存储路径(默认 ~/.edm-token.json), login browser 支持 --domain`);
+通用: --state <path> 指定存储路径(默认 ~/.edm-token.json), --json 只输出 JSON
+      login sms 另支持 --region 86 --code <6位码>(用于脚本化分段调用)`);
     process.exit(cmd ? 1 : 0);
   }
 
